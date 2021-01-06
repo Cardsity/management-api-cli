@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"strings"
 )
 
 type configProperties struct {
@@ -65,27 +66,28 @@ func getProperties() runtimeProperties {
 	// Values passed via command line args take precedence over values passed via config.json
 	serverAdress := flag.String("s", readConfig.ServerAdress, "Specify the server adress")
 	jwt := flag.String("j", readConfig.JWT, "Specify the bearer token")
-	action := flag.String("a", "checkConnection", "Action (login, register, checkConnection)")
+	action := flag.String("a", "checkConnection", "Action (login, register, authInfo, checkConnection)")
 	userName := flag.String("u", "", "Username (for registration / login)")
 	userPassword := flag.String("p", "", "Password (for registration / login)")
 	flag.Parse()
 
 	// Check whether the given combination of arguments is valid
+	*action = strings.ToLower(*action)
 	actionIsValid := false
-	for _, v := range []string{"login", "register", "checkConnection"} {
+	for _, v := range []string{"login", "register", "checkConnection", "authinfo"} {
 		if *action == v {
 			actionIsValid = true
 		}
 	}
 	if !actionIsValid {
-		panic("Unknown action")
+		exitWithError("Unknown action")
 	}
 	if *action == "login" || *action == "register" {
 		if *userName == "" || *userPassword == "" {
-			panic("Please set a username and a password")
+			exitWithError("Please set a username and a password")
 		}
 	} else if *jwt == "" {
-		panic("Please set a jwt using the config.json or the command line argument -j")
+		exitWithError("Please set a jwt using the config.json or the command line argument -j")
 	}
 
 	// Return the valid conclusion
@@ -102,34 +104,34 @@ func getProperties() runtimeProperties {
 	}
 }
 
-type loginUserReturnStruct struct {
-	UserID       int    `json:"userId"`
-	UserName     string `json:"username"`
-	Jwt          string `json:"jwt"`
-	SessionToken string `json:"sessionToken"`
-	ValidUntil   string `json:"validUntil"`
-}
-
 type erroredReturnStruct struct {
 	Error  bool     `json:"error"`
 	Errors []string `json:"errors"`
 }
 
-func sendAPIRequest(serverAdress string, apiCall, request interface{}) ([]byte, []error) {
-	marshaledRequest, err := json.Marshal(request)
-	if err != nil {
-		panic(err)
+func sendAPIRequest(serverAdress string, apiCall string, request interface{}, method string, jwt *string) ([]byte, []error) {
+	var requestToSend *bytes.Buffer = new(bytes.Buffer)
+	if request != nil {
+		marshaledRequest, err := json.Marshal(request)
+		if err != nil {
+			panic(err)
+		}
+		requestToSend = bytes.NewBuffer(marshaledRequest)
 	}
-	req, err := http.Post(fmt.Sprintf("%v/%v", serverAdress, apiCall), "application/json", bytes.NewBuffer(marshaledRequest))
+	req, err := http.NewRequest(method, fmt.Sprintf("%v/%v", serverAdress, apiCall), requestToSend)
+	if jwt != nil {
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer JWT %v", *jwt))
+	}
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, []error{errors.New("Connection failed")}
 	}
-	defer req.Body.Close()
-	response, err := ioutil.ReadAll(req.Body)
+	defer res.Body.Close()
+	response, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		panic(err)
 	}
-	if req.StatusCode != 200 {
+	if res.StatusCode != 200 {
 		var errorStruct erroredReturnStruct
 		err = json.Unmarshal(response, &errorStruct)
 		if err != nil {
@@ -142,66 +144,6 @@ func sendAPIRequest(serverAdress string, apiCall, request interface{}) ([]byte, 
 		return response, errorList
 	}
 	return response, nil
-}
-
-type userLoginStruct struct {
-	UserName string `json:"username"`
-	Password string `json:"password"`
-}
-
-func loginUser(serverAdress string, userName string, userPassword string) loginUserReturnStruct {
-	type succesfulResponse struct {
-		Data  loginUserReturnStruct `json:"data"`
-		Error bool                  `json:"error"`
-	}
-	response, errList := sendAPIRequest(serverAdress, "v1/auth/login", userLoginStruct{
-		UserName: userName,
-		Password: userPassword,
-	})
-	if errList != nil {
-		if containsErrorCode("ERR_NOT_FOUND", errList) {
-			exitWithError("User not found")
-		} else if containsErrorCode("ERR_FORBIDDEN", errList) {
-			exitWithError("Login disallowed. Wrong password?")
-		} else {
-			panic(errList[0])
-		}
-	}
-	var unmarshaledResponse succesfulResponse
-	err := json.Unmarshal(response, &unmarshaledResponse)
-	if err != nil {
-		panic(err)
-	}
-	return unmarshaledResponse.Data
-}
-
-func registerUser(serverAdress string, userName string, userPassword string) string {
-	type successfulResposeData struct {
-		Username string `json:"username"`
-	}
-	type successfulRespose struct {
-		Err  bool                  `json:"err"`
-		Data successfulResposeData `json:"data"`
-	}
-	response, errList := sendAPIRequest(serverAdress, "v1/auth/register", userLoginStruct{
-		UserName: userName,
-		Password: userPassword,
-	})
-	if errList != nil {
-		if containsErrorCode("ERR_INTERNAL", errList) {
-			exitWithError("Internal Server error. Maybe this has something to do with\n>https://github.com/Cardsity/issue-tracker/issues/3")
-		} else if containsErrorCode("ERR_PASSWORD_REQUIREMENTS_NOT_MET", errList) {
-			exitWithError("Password to weak")
-		} else {
-			panic(errList)
-		}
-	}
-	var unmarshaledResponse successfulRespose
-	err := json.Unmarshal(response, &unmarshaledResponse)
-	if err != nil {
-		panic(err)
-	}
-	return unmarshaledResponse.Data.Username
 }
 
 func writeToConfiguration(properties configProperties) {
@@ -246,6 +188,11 @@ func main() {
 		{
 			createdUserName := registerUser(properties.config.ServerAdress, properties.userActionProperties.userName, properties.userActionProperties.userPassword)
 			fmt.Printf("Created user with name %v\n", createdUserName)
+		}
+	case "authinfo":
+		{
+			authInfo := getAuthInfo(properties.config.ServerAdress, properties.config.JWT)
+			fmt.Printf("Logged in as %v (%v)\n", authInfo.Username, authInfo.ID)
 		}
 	}
 }
