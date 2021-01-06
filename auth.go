@@ -84,7 +84,7 @@ func registerUser(serverAdress string, userName string, userPassword string) str
 		} else if containsErrorCode("ERR_PASSWORD_REQUIREMENTS_NOT_MET", errList) {
 			exitWithError("Password to weak")
 		} else if containsErrorCode("ERR_DUPLICATE_USERNAME", errList) {
-			exitWithError("A user with this username already exists")
+			exitWithError("A user with that username already exists")
 		} else {
 			panic(errList[0].Error())
 		}
